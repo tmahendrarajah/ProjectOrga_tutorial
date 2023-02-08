@@ -1,0 +1,967 @@
+---
+engine: knitr
+execute:
+  eval: false
+format:
+  html:
+    embed-resources: true
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Workflow to place archaeal BS MAGs using the Undine-markers
+
+**Description:**
+
+Based on previous analyses, we know that there are some MAGs that are hard to place using the Elife and Zaremba markers. In order to confirm the placement, we used the Undine-markers, an archaeal-specific marker set.
+
+**Comments**:
+
+File that records how the genomes were compiled can be found on the local mac:
+/Users/ninadombrowski/Desktop/WorkingDir/Texel/Projects/BlackSea/BlackSea18/Phylogeny/Illumina/Elife/25_markers/0_taxa/workflow.md
+
+
+## Requirements
+
+**Programs:**
+
+- Python 2.7.5
+- Perl v5.16.3
+- GNU Awk 4.0.2
+- sed 4.2.2
+- grep (GNU grep) 2.20
+- BMGE-1.12
+- MAFFT v7.407
+- GNU parallel 20181222 (not needed, but in case you want to speed some things up this is useful)
+- iqtree/2.1.2
+
+
+**Custom scripts:**
+
+- screen_list_new.pl: Only keep a subset of proteins from a faa file
+- formatFigtree3.pl: Color, root trees using figtree
+- length+GC.pl: Calculate the length/GC of sequences
+- catfasta2phyml.pl: Concatenate marker genes, originally from [here](https://github.com/nylander/catfasta2phyml)
+
+- sequence_correler.py: Identify duplicated sequences and what sequence should be best to remove. **note to self**: Check with Adri how to publish
+- faa_drop.py: Remove sequences with a lot of gaps
+
+
+**Databases/Other**
+
+- genome_lists: Either path to one column file including the list of genomes to analyse or path to such files in case more than one is used (environmental variable set in section below)
+- 52tested_inclTIGR.hmm: A customized TIGR hmm database to identify marker proteins (stored as `hmm_db` in the following section)
+- A list of genome faa files to analyse (stored as `Genomes_faa` in the following section)
+- 52_markers_list: The list of markers used to generated a concatenated species tree (stored as `undin_markers` in the following section)
+- proteins_to_remove: If applicable, a list of proteins wrongly placed into marker proteins (stored as `seq_to_remove_v1` in the following section)
+
+
+
+## Set working environment
+
+```{bash}
+wdir="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v2"
+cd $wdir
+
+hmm_db="//export/lv1/user/spang_team/Databases/52_tested_markers/52tested_inclTIGR.hmm"
+
+Genomes_faa="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/taxon_set_v2/faa/All_Genomes.faa"
+genome_lists="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/taxon_set_v2/FileLists"
+seq_to_remove_v1='/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v1/FileLists/proteins_to_remove'
+
+undin_markers="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v2/FileLists/52_markers_list"
+```
+
+
+
+## Organize genomes
+
+
+```{bash} 
+mkdir FileLists
+
+cat $genome_lists/Arc_v6BS_list $genome_lists/Arc_v8_list \
+   $genome_lists/Arc_BS_All_water_list \
+   > FileLists/GenomeList_All
+
+cat $genome_lists/Arc_v6BS_list $genome_lists/Arc_v8_list \
+   $genome_lists/dREP_JE3_list_arc.txt \
+   > FileLists/GenomeList_Rep
+
+#we deal with so many genomes: 1070 and 529
+wc -l FileLists/GenomeList_All
+wc -l FileLists/GenomeList_Rep
+
+#control: 106
+grep -c "NIOZ" FileLists/GenomeList_Rep
+wc -l  $genome_lists/dREP_JE3_list_arc.txt 
+
+#generated useful file to add tax names into the treefile 
+cat <(grep -v "NIOZ"  ../v1/FileLists/names_to_replace) FileLists/names_to_replace_NIOZ  > FileLists/names_to_replace_07122022
+```
+
+
+
+
+
+## Search for marker proteins by first running hmmsearch against a custom db
+
+Notice: we run the search against all BS archaeal MAGs but within this workflow we will only do the tree for the representative taxa
+
+
+```{bash}
+mkdir Hmmersearch
+
+#remove contaminants (this step is optional and done if you inspected single gene trees for issues)
+fgrep -v -f $seq_to_remove_v1 ../v1/Hmmersearch/All_NCBI_COGs_hmm.txt  > Hmmersearch/All_NCBI_COGs_hmm_clean.txt
+
+#control counts: 5804853 - 5804391 --> 462
+wc -l ../v1/Hmmersearch/All_NCBI_COGs_hmm.txt 
+wc -l Hmmersearch/All_NCBI_COGs_hmm_clean.txt
+```
+
+Summary:
+
+Initially, our table contained 5,804,853 hits. Of these 462 hits were removed due them being potential paralogues or not assigned to the correct marker gene of interest based on investigating single gene trees prior to this analysis.
+
+
+
+
+
+## Prepare phylogeny using the elife markers
+
+### Clean COG data and extract COGs of interest
+
+```{bash} 
+#subset data
+fgrep -f FileLists/GenomeList_Rep Hmmersearch/All_NCBI_COGs_hmm_clean.txt > Hmmersearch/All_NCBI_COGs_hmm_RepSet.txt
+
+#control that we got the data for all genomes --> 529
+awk -F'\t' -v OFS='\t' '{split($1,a,"-")}{print a[1]}' Hmmersearch/All_NCBI_COGs_hmm_RepSet.txt| sort | uniq | wc -l
+
+#duplicate column1 (for cosmetics and easier searching later)
+awk -F'\t' -v OFS='\t' '{print $0, $1}'  Hmmersearch/All_NCBI_COGs_hmm_RepSet.txt > Hmmersearch/temp
+
+#separate the elife marker genes into indiv. files
+mkdir -p FileLists/single_markers
+
+for sample in `cat  $undin_markers`; do grep "$sample" Hmmersearch/temp > FileLists/single_markers/${sample}.txt; done
+
+#check that the nr of markers is good --> 51
+ll FileLists/single_markers/*txt | wc -l
+
+#cut after first column to get only binID
+mkdir FileLists/split
+
+#clean header
+for sample in `cat  $undin_markers`; do awk -F'\t' -v OFS='\t' '{split($1,a,"-"); print a[1], $2, $3, $4, $5, $6, $7, $8 }' FileLists/single_markers/$sample* > FileLists/split/$sample |LC_ALL=C  sort ; done
+
+#check counts (here make sure that the max more or less makes sense)
+wc -l FileLists/split/*
+```
+
+Discard any markers with >=1% of dubs (for 529 markers --> 582 hits)
+
+    469 FileLists/split/gtdb_PF00466.15  
+    487 FileLists/split/gtdb_PF00687.16  
+    481 FileLists/split/gtdb_PF00827.12  
+    490 FileLists/split/gtdb_PF00900.15  
+    488 FileLists/split/gtdb_PF01000.21  
+    461 FileLists/split/gtdb_PF01015.13  
+    477 FileLists/split/gtdb_PF01090.14  
+    494 FileLists/split/gtdb_PF01157.13  
+    487 FileLists/split/gtdb_PF01200.13  
+    486 FileLists/split/gtdb_PF01655.13  
+    414 FileLists/split/gtdb_PF01798.13  
+    472 FileLists/split/gtdb_PF07541.7  
+    242 FileLists/split/gtdb_PF13685.1  
+    422 FileLists/split/OG525.  
+    495 FileLists/split/PF00410.14  
+    499 FileLists/split/PF00673  
+    486 FileLists/split/TIGR00037  
+    536 FileLists/split/TIGR00055  
+    469 FileLists/split/TIGR00064  
+    454 FileLists/split/TIGR00092  
+    411 FileLists/split/TIGR00111  
+    476 FileLists/split/TIGR00279  
+    495 FileLists/split/TIGR00291  
+    345 FileLists/split/TIGR00335  
+    390 FileLists/split/TIGR00373  
+    486 FileLists/split/TIGR00405  
+    484 FileLists/split/TIGR00448  
+    472 FileLists/split/TIGR00483  
+    472 FileLists/split/TIGR00491  
+    474 FileLists/split/TIGR00501  
+    493 FileLists/split/TIGR00967  
+    489 FileLists/split/TIGR00982  
+    483 FileLists/split/TIGR01008  
+    486 FileLists/split/TIGR01012  
+    495 FileLists/split/TIGR01020  
+    493 FileLists/split/TIGR01028  
+    497 FileLists/split/TIGR01171  
+    166 FileLists/split/TIGR01425  
+    860 FileLists/split/TIGR02065 ***  
+    405 FileLists/split/TIGR02389  
+    478 FileLists/split/TIGR02390  
+    489 FileLists/split/TIGR03626  
+    489 FileLists/split/TIGR03628  
+    490 FileLists/split/TIGR03629  
+    572 FileLists/split/TIGR03633
+    483 FileLists/split/TIGR03670  
+    498 FileLists/split/TIGR03673  
+    894 FileLists/split/TIGR03675 ***  
+    473 FileLists/split/TIGR03676  
+    485 FileLists/split/TIGR03680  
+    469 FileLists/split/TIGR03722  
+
+
+
+To remove:
+
+- TIGR02065  
+- TIGR03675  
+
+
+### Clean marker List
+
+```{bash}
+#cp file and remove markers mentioned above
+cp /export/lv1/user/spang_team/Databases/52_tested_markers/52_markers_list FileLists
+
+#check if all is ok: 49 (instead of 51)
+wc -l FileLists/52_markers_list
+
+#set new variable
+undin_markers="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v2/FileLists/52_markers_list"
+```
+
+
+
+
+
+### Extract marker proteins
+
+Notice, these markers can have multi-copy proteins, therefore we need to remove this at a later point.
+
+```{bash}
+#get list of proteins to extract from faa file
+mkdir FileLists/protein_list_non_dedup
+
+for sample in `cat  $undin_markers`; do awk -F'\t' -v OFS='\t' '{print $5 }' FileLists/split/$sample* > FileLists/protein_list_non_dedup/$sample |LC_ALL=C  sort ; done
+
+#extract faa sequences
+mkdir -p Marker_Genes/non_dedup
+
+for sample in `cat  $undin_markers`; do perl ~/../spang_team/Scripts/Others/screen_list_new.pl FileLists/protein_list_non_dedup/$sample $Genomes_faa  keep > Marker_Genes/non_dedup/${sample}.faa; done
+
+#control that all the names you expect are there --> 529
+grep ">" Marker_Genes/non_dedup/*faa | cut -f2 -d ">" | cut -f1 -d "-" | sort | uniq > Names.txt
+wc -l Names.txt
+
+#count proteins per sample
+grep -c ">" Marker_Genes/non_dedup/*faa
+```
+
+
+
+Marker_Genes/non_dedup/gtdb_PF00466.15.faa:469  
+Marker_Genes/non_dedup/gtdb_PF00687.16.faa:487  
+Marker_Genes/non_dedup/gtdb_PF00827.12.faa:481  
+Marker_Genes/non_dedup/gtdb_PF00900.15.faa:490  
+Marker_Genes/non_dedup/gtdb_PF01000.21.faa:488  
+Marker_Genes/non_dedup/gtdb_PF01015.13.faa:461  
+Marker_Genes/non_dedup/gtdb_PF01090.14.faa:477  
+Marker_Genes/non_dedup/gtdb_PF01157.13.faa:494  
+Marker_Genes/non_dedup/gtdb_PF01200.13.faa:487  
+Marker_Genes/non_dedup/gtdb_PF01655.13.faa:486  
+Marker_Genes/non_dedup/gtdb_PF01798.13.faa:414  
+Marker_Genes/non_dedup/gtdb_PF07541.7.faa:472  
+Marker_Genes/non_dedup/gtdb_PF13685.1.faa:242  
+Marker_Genes/non_dedup/OG525..faa:422  
+Marker_Genes/non_dedup/PF00410.14.faa:495  
+Marker_Genes/non_dedup/PF00673.faa:499  
+Marker_Genes/non_dedup/TIGR00037.faa:486  
+Marker_Genes/non_dedup/TIGR00055.faa:536  
+Marker_Genes/non_dedup/TIGR00064.faa:469  
+Marker_Genes/non_dedup/TIGR00092.faa:454  
+Marker_Genes/non_dedup/TIGR00111.faa:411  
+Marker_Genes/non_dedup/TIGR00279.faa:476  
+Marker_Genes/non_dedup/TIGR00291.faa:495  
+Marker_Genes/non_dedup/TIGR00335.faa:345  
+Marker_Genes/non_dedup/TIGR00373.faa:390  
+Marker_Genes/non_dedup/TIGR00405.faa:486  
+Marker_Genes/non_dedup/TIGR00448.faa:484  
+Marker_Genes/non_dedup/TIGR00483.faa:472  
+Marker_Genes/non_dedup/TIGR00491.faa:472  
+Marker_Genes/non_dedup/TIGR00501.faa:474  
+Marker_Genes/non_dedup/TIGR00967.faa:493  
+Marker_Genes/non_dedup/TIGR00982.faa:489  
+Marker_Genes/non_dedup/TIGR01008.faa:483  
+Marker_Genes/non_dedup/TIGR01012.faa:486  
+Marker_Genes/non_dedup/TIGR01020.faa:495  
+Marker_Genes/non_dedup/TIGR01028.faa:493  
+Marker_Genes/non_dedup/TIGR01171.faa:497  
+Marker_Genes/non_dedup/TIGR01425.faa:166  
+Marker_Genes/non_dedup/TIGR02389.faa:405  
+Marker_Genes/non_dedup/TIGR02390.faa:478  
+Marker_Genes/non_dedup/TIGR03626.faa:489  
+Marker_Genes/non_dedup/TIGR03628.faa:489  
+Marker_Genes/non_dedup/TIGR03629.faa:490  
+Marker_Genes/non_dedup/TIGR03633.faa:572  
+Marker_Genes/non_dedup/TIGR03670.faa:483  
+Marker_Genes/non_dedup/TIGR03673.faa:498  
+Marker_Genes/non_dedup/TIGR03676.faa:473  
+Marker_Genes/non_dedup/TIGR03680.faa:485  
+Marker_Genes/non_dedup/TIGR03722.faa:469  
+
+
+
+
+### Calculate nr of sequences to remove
+
+```{bash} 
+cd Marker_Genes/non_dedup
+
+#count number genomes with duplicates
+for sample in *faa; do grep ">" ${sample}  | cut -f1 -d "-" | sort | uniq -d | cat <(echo $sample) <(wc -l) | pr -T -2; done > temp1
+
+#count total number of duplicates
+for sample in *faa; do grep ">" ${sample}  | cut -f1 -d "-" | sort | uniq -d -c | awk -v var1=$sample '{sum += $1 - 1} END {print var1, sum}' ; done > temp2
+
+#combine 
+awk 'FNR==NR{a[$1]=$0;next}{print $0,a[$1]}' temp2 temp1 | awk -v OFS="\t" '{print $1, $2, $4}' | cat <(echo -e 'MarkerID\tNr_dup_genomes\tNr_dup_genes') - 
+
+rm -f temp*
+
+cd ../..
+```
+
+
+
+MarkerID	Nr_dup_genomes	Nr_dup_genes  
+gtdb_PF00466.15.faa	0	 
+gtdb_PF00687.16.faa	0	 
+gtdb_PF00827.12.faa	0	 
+gtdb_PF00900.15.faa	3	3  
+gtdb_PF01000.21.faa	0	 
+gtdb_PF01015.13.faa	0	 
+gtdb_PF01090.14.faa	0	 
+gtdb_PF01157.13.faa	0	 
+gtdb_PF01200.13.faa	0	 
+gtdb_PF01655.13.faa	0	 
+gtdb_PF01798.13.faa	0	 
+gtdb_PF07541.7.faa	0	 
+gtdb_PF13685.1.faa	0	 
+OG525..faa	0	 
+PF00410.14.faa	1	1  
+PF00673.faa	3	3  
+TIGR00037.faa	3	4  
+TIGR00055.faa	104	112 ***  
+TIGR00064.faa	1	1  
+TIGR00092.faa	2	2. 
+TIGR00111.faa	1	2  
+TIGR00279.faa	0	  
+TIGR00291.faa	2	2  
+TIGR00335.faa	3	3  
+TIGR00373.faa	2	2  
+TIGR00405.faa	0	  
+TIGR00448.faa	0	  
+TIGR00483.faa	2	2  
+TIGR00491.faa	1	1  
+TIGR00501.faa	2	2  
+TIGR00967.faa	0	  
+TIGR00982.faa	0	  
+TIGR01008.faa	1	1  
+TIGR01012.faa	1	1  
+TIGR01020.faa	1	1  
+TIGR01028.faa	1	1  
+TIGR01171.faa	0	  
+TIGR01425.faa	0	  
+TIGR02389.faa	0	  
+TIGR02390.faa	1	1  
+TIGR03626.faa	0	  
+TIGR03628.faa	0	  
+TIGR03629.faa	0	  
+TIGR03633.faa	72 80 ***   
+TIGR03670.faa	0	  
+TIGR03673.faa	3	3  
+TIGR03676.faa	2	2  
+TIGR03680.faa	1	1  
+TIGR03722.faa	0	  
+
+Here, we double check again if we need to remove anything with > 53 duplicates
+
+TIGR00055
+TIGR03633
+
+
+
+## cleanup
+
+
+```{bash}
+#rm the marker mentioned above in our list
+
+#check if all is ok: 47 (instead of 49 --> 51)
+wc -l FileLists/52_markers_list
+
+#control variable
+wc -l $undin_markers
+```
+
+
+
+
+### Align and trim (on laplace, 38670)
+
+```{bash}
+mkdir -p Alignment_non_dedup/mafft
+mkdir -p Alignment_non_dedup/bmge
+
+cp ~/../spang_team/Scripts/Bash_scripts/mafft_linsi_splitting_arCOGs.sh mafft_linsi_v1.sh
+
+#align on laplace: 111003 
+undin_markers="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v2/FileLists/52_markers_list"
+
+parallel -j25 'i={}; mafft-linsi --reorder --thread 4 Marker_Genes/non_dedup/${i}* > Alignment_non_dedup/mafft/${i}.aln' ::: `cat $undin_markers`
+
+#trim
+parallel -j10 'i={}; nice -n 10 java -jar /opt/biolinux/BMGE-1.12/BMGE.jar -i Alignment_non_dedup/mafft/$i* -t AA -m BLOSUM30 -h 0.55 -of Alignment_non_dedup/bmge/${i}.aln ' :::  `cat $undin_markers`
+```
+
+
+
+
+
+### run single gene trees
+
+#### on untrimmed alignments
+
+Notice: We are interested in the untrimmed alignment since bmge can remove sequences
+
+
+```{bash}
+#prepare files
+mkdir -p Phylogeny/single_non_dedup_untrimmed
+cp Alignment_non_dedup/mafft/*aln Phylogeny/single_non_dedup_untrimmed/
+cd Phylogeny/single_non_dedup_untrimmed/
+
+#run trees
+cp ~/../spang_team/Scripts/Bash_scripts/iqtree_ALE_1.sh iqtree_untrimmed.sh
+
+#run on laplaceL 129888
+module load iqtree/2.1.2
+
+undin_markers="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v2/FileLists/52_markers_list"
+
+parallel -j47 'i={}; iqtree2 -s ${i}.aln -m LG  -T AUTO -keep-ident --threads-max 2 -bb 1000 -bnni' ::: `*treefile`
+```
+
+
+
+#### on trimmed alignments
+
+Notice: We use these trees to inspect the single gene trees
+
+
+```{bash}
+#prepare files
+mkdir -p Phylogeny/single_non_dedup_trimmed
+cp Alignment_non_dedup/bmge/*aln Phylogeny/single_non_dedup_trimmed/
+cd Phylogeny/single_non_dedup_trimmed/
+
+#run trees
+cp ~/../spang_team/Scripts/Bash_scripts/iqtree_ALE_1.sh iqtree_trimmed.sh
+
+#run on laplaceL 129889
+module load iqtree/2.1.2
+
+undin_markers="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v2/FileLists/52_markers_list"
+
+parallel -j47 'i={}; iqtree2 -s ${i}.aln -m LG  -T AUTO -keep-ident --threads-max 2 -bb 1000 -bnni' ::: `cat $undin_markers`
+
+cd Phylogeny/single_non_dedup_trimmed/
+
+#add tax string into treefile (not necessary but useful if we want to check the trees)
+parallel -j33 'i={}; awk -f ~/../spang_team/Scripts/Others/search_replace.awk  ../../FileLists/names_to_replace_07122022 ${i} > ${i}_renamed' ::: *treefile
+
+#get file path list and color mapping
+ls -d "$PWD"/*renamed | tac - > listOfFiles2.list
+cp /export/lv4/user/spang_team/Projects/DPANN_evolution/ALE/arcogs/v2/FileLists/color_mapping2 .
+
+#prepare files for figtree
+export LC_ALL=C
+export LANG=C
+
+perl ~/../spang_team/Scripts/Others//formatFigtree3.pl listOfFiles2.list -C color_mapping2
+
+#mv colored trees somewhere else
+mkdir colored
+mv *fgcol colored
+cd colored
+
+#convert to pdf (done on local computer)
+#for sample in *col; do figtree -graphic PDF -width 2000 -height 9000 ${sample} ${sample}.pdf; done
+
+cd ../../..
+```
+
+Notice:
+
+Trees generated using the trimmed alignments were checked for correct removal of duplicated sequences and other artefacts. List of proteins was stored in `FileLists/proteins_to_remove`
+
+***
+REMOVE TIGR00092 (larger duplication in Eurys that was identified in v1)
+***
+
+
+
+##### compare distances to find out what the best marker proteins are (focus on split proteins)
+
+The script comes from Adri and was adjusted by Nina. This script uses the mldist file from iqtree (pairwise distance matrix based on sequence composition)  to calculate the mean position of a genome across all phylogenetic markers of interest. It then throws out multicopy genes based on how close they are to this mean position.
+
+```{bash}
+#organize data
+mkdir Phylogeny/single_non_dedup_untrimmed/mldist
+cp Phylogeny/single_non_dedup_untrimmed/*mldist Phylogeny/single_non_dedup_untrimmed/mldist/
+
+mkdir -p mldist_analysis/v1
+cd mldist_analysis/v1
+
+source ~/.bashrc.conda3
+python3 ~/../spang_team/Scripts/Others/sequence_correler.py -i ../../Phylogeny/single_non_dedup_untrimmed/mldist -o Duplicates
+
+#count how many duplicates we removed
+for sample in `cat $undin_markers`; do grep -c "$sample" *MulticopySequencesFilteredOut.tsv | awk -v var1=$sample '{print var1, $0}' ; done
+
+#make a list of markers without duplicates
+for sample in `cat $undin_markers`; do grep -c "$sample" *MulticopySequencesFilteredOut.tsv | awk -v var1=$sample '{print var1, $0}' | awk '$2 == 0 {print $1}' ; done > non_duplicate_markers
+
+#split the table by marker genes
+mkdir protein_lists
+cd protein_lists
+awk '{print $2 > $1".txt"}' ../*MulticopySequencesFilteredOut.tsv
+
+#cleanup one probematic file
+rm -f Marker.txt 
+
+cd ../../../
+
+conda deactivate
+```
+
+
+
+##### Remove duplicates
+
+
+```{bash}
+cd ../..
+mkdir Marker_Genes/dedup
+
+#cleanup marker list (saver under *2)
+#nano /export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/FileLists/52_markers_list
+
+#remove duplicates
+for sample in `cat $undin_markers`; do perl ~/../spang_team/Scripts/Others/screen_list_new.pl FileLists/proteins_to_remove Marker_Genes/non_dedup/${sample}*.faa > Marker_Genes/dedup/${sample}.faa ; done 
+#control that we have all markers --> 46
+ll Marker_Genes/dedup/*faa | wc -l
+
+#control for duplicated genomes in the new files
+mkdir dup_control 
+
+for sample in `cat $undin_markers`; do grep ">" Marker_Genes/dedup/${sample}.faa | cut -f1 -d "-" | sort | uniq -d -c > dup_control/${sample}.txt; done
+
+#check if all files are empty, if not you know where to check: all 0
+wc -l dup_control/*txt
+```
+
+
+
+### Calculate avg protein length and protein nr
+
+```{bash}
+cd Marker_Genes/dedup/
+
+for sample in `cat $undin_markers`; do perl ~/../spang_team/Scripts/Others/length+GC.pl ${sample}* | awk -F'\t' -v var1=$sample '{sum+=$3 }END { print var1 , sum/NR }' ; done
+
+#also generate a list with the sequence lenght of everything
+for sample in `cat $undin_markers`; do perl ~/../spang_team/Scripts/Others/length+GC.pl ${sample}* | awk -F'\t' -v var1=$sample '{ print var1 , $1, $3 }' ; done > Markers_lengths.txt
+
+grep -c ">" *faa
+
+cd ../..
+```
+
+Average aln length:
+
+OG525. 572.642    
+PF00410.14 129.087  
+gtdb_PF00466.15 321.386  
+PF00673 175.429  
+gtdb_PF00687.16 217.575  
+gtdb_PF00827.12 185.865  
+gtdb_PF00900.15 234.511  
+gtdb_PF01000.21 252.082  
+gtdb_PF01015.13 218.115  
+gtdb_PF01090.14 156.096  
+gtdb_PF01157.13 97.753  
+gtdb_PF01200.13 79.8522  
+gtdb_PF01655.13 170.748  
+gtdb_PF01798.13 330.21  
+gtdb_PF07541.7 256.54  
+gtdb_PF13685.1 347.36  
+TIGR00037 130.234  
+TIGR00064 370.036  
+TIGR00111 344.32  
+TIGR00279 179.527  
+TIGR00291 231.471  
+TIGR00335 384.506  
+TIGR00373 196.546  
+TIGR00405 176.819  
+TIGR00448 193.165  
+TIGR00483 417.151  
+TIGR00491 582.393  
+TIGR00501 295.023  
+TIGR00967 474.73  
+TIGR00982 146.491  
+TIGR01008 260.068  
+TIGR01012 219.806  
+TIGR01020 239.387  
+TIGR01028 203.453  
+TIGR01171 236.497  
+TIGR01425 444.241  
+TIGR02389 422.736  
+TIGR02390 922.453  
+TIGR03626 326.577  
+TIGR03628 139.945  
+TIGR03629 166.449  
+TIGR03670 807.828  
+TIGR03673 134.786  
+TIGR03676 418.813  
+TIGR03680 408.808  
+TIGR03722 348.073  
+
+Number of sequences per marker:  
+
+OG525..faa:422  
+PF00410.14.faa:494  
+PF00673.faa:496  
+TIGR00037.faa:482  
+TIGR00064.faa:468  
+TIGR00111.faa:409  
+TIGR00279.faa:476  
+TIGR00291.faa:493  
+TIGR00335.faa:342  
+TIGR00373.faa:388  
+TIGR00405.faa:486  
+TIGR00448.faa:484  
+TIGR00483.faa:470  
+TIGR00491.faa:471  
+TIGR00501.faa:472  
+TIGR00967.faa:493  
+TIGR00982.faa:489  
+TIGR01008.faa:482  
+TIGR01012.faa:484  
+TIGR01020.faa:494  
+TIGR01028.faa:492  
+TIGR01171.faa:497  
+TIGR01425.faa:166  
+TIGR02389.faa:405  
+TIGR02390.faa:477  
+TIGR03626.faa:489  
+TIGR03628.faa:489  
+TIGR03629.faa:490  
+TIGR03670.faa:483  
+TIGR03673.faa:495  
+TIGR03676.faa:471  
+TIGR03680.faa:484  
+TIGR03722.faa:467  
+gtdb_PF00466.15.faa:469  
+gtdb_PF00687.16.faa:487  
+gtdb_PF00827.12.faa:481  
+gtdb_PF00900.15.faa:487  
+gtdb_PF01000.21.faa:488  
+gtdb_PF01015.13.faa:461  
+gtdb_PF01090.14.faa:477  
+gtdb_PF01157.13.faa:494  
+gtdb_PF01200.13.faa:487  
+gtdb_PF01655.13.faa:484  
+gtdb_PF01798.13.faa:414  
+gtdb_PF07541.7.faa:472  
+gtdb_PF13685.1.faa:242  
+
+
+### Clean the header so that we can concatenate later
+
+
+```{bash}
+cd Marker_Genes/dedup/
+
+#shorten header to be able to concatenate later
+mkdir renamed
+
+for sample in `cat $undin_markers`
+do
+cut -f1 -d "-" $sample*>> renamed/${sample}.faa
+done
+
+#control that all the names you expect are there --> 529
+grep ">" renamed/*faa | cut -f2 -d ">" | sort | uniq > Names.txt
+wc -l Names.txt
+
+cd ../..
+```
+
+
+
+
+
+### Make a count table
+
+
+This table lists for each mag (before removing duplicates), how many (and which) markers we have got. You can easily run this for the deduplicated marker genes as well , by changing the folder in the first step.
+
+```{bash}
+#for each marker, list what genomes have that marker
+cd Marker_Genes/dedup
+
+#assumes that the genome and protein ID is separated by a `-`
+#gives a two column table (Marker, Genome)
+grep ">" *faa | sed 's/\.faa:>/\t/g' | awk 'BEGIN{FS=OFS="\t"}{split($2,a,"-")}{print $1,a[1]}' > MarkerList.txt
+
+#make a count table in python
+python
+
+#load relevant libs
+import numpy as np
+import pandas as pd
+
+#read in data, add header and view data
+df = pd.read_csv('MarkerList.txt', sep="\t", header=None)
+df.columns=["marker", "genome"]
+df.head()
+
+#group the data by the markers and count the occurences
+count_table=df.groupby(["marker","genome"]).size().reset_index()
+count_table.columns=["marker", "genome", "indiv_count"]
+count_table.head()
+
+#for each genome give a total count
+total_counts = count_table.groupby(by=["genome"])["indiv_count"].sum().reset_index()
+total_counts.columns = ['genome', 'total_count']
+total_counts.head()
+
+#combine with prev dataframe
+count_table_2 = pd.merge(count_table, total_counts, on = "genome", how = "left")
+count_table_2.head()
+
+#convert from long to wide
+counts_wide=count_table_2.pivot_table(values="indiv_count", index=["genome",'total_count'], columns= ["marker"], fill_value=0, margins=True)
+counts_wide.head()
+
+#print
+counts_wide.to_csv('counts.txt',sep='\t')
+
+#quit
+exit()
+
+cd ../..
+
+#check file
+#less -S Marker_Genes/dedup/counts.txt 
+```
+
+
+
+
+### Align and trim
+
+Notice, adjust the parallel option (-j) according to the free cpus on ada, take care not to use more than 30% of the available cpus
+
+**Notice: Depending on the nr of taxa and/or type of data analysis use either mafft or mafft-linsi **
+
+
+```{bash}
+#6a. align with mafft: 131076
+mkdir Alignment
+mkdir Alignment/mafft
+
+cp mafft_linsi_v1.sh mafft_linsi_v2.sh
+
+undin_markers="/export/lv1/user/spang_team/Projects/BlackSea18/Phylogeny/UndineMarkers/v2/FileLists/52_markers_list"
+
+parallel -j25 'i={}; mafft-linsi  --reorder --thread 4 Marker_Genes/dedup/renamed/${i}* > Alignment/mafft/${i}.aln' ::: `cat $undin_markers`
+
+
+#6b. Trim using BMGE
+mkdir Alignment/BMGE
+mkdir Alignment/BMGE/h0.55
+
+parallel -j5 'i={}; nice -n 10 java -jar /opt/biolinux/BMGE-1.12/BMGE.jar -i Alignment/mafft/$i* -t AA -m BLOSUM30 -h 0.55 -of Alignment/BMGE/h0.55/$i ' :::  `cat $undin_markers`
+```
+
+
+
+
+
+
+
+### Calculate avg aln length
+
+```{bash}
+cd Alignment/BMGE/h0.55/
+
+for sample in `cat $undin_markers`; do perl ~/../spang_team/Scripts/Others/length+GC.pl ${sample}* | awk -F'\t' -v var1=$sample '{sum+=$3 }END { print var1 , sum/NR }' ; done
+
+cd ../../..
+```
+
+OG525. 497  
+PF00410.14 122  
+gtdb_PF00466.15 233  
+PF00673 146  
+gtdb_PF00687.16 171  
+gtdb_PF00827.12 158  
+gtdb_PF00900.15 187  
+gtdb_PF01000.21 141  
+gtdb_PF01015.13 153  
+gtdb_PF01090.14 120  
+gtdb_PF01157.13 82  
+gtdb_PF01200.13 63  
+gtdb_PF01655.13 81  
+gtdb_PF01798.13 186  
+gtdb_PF07541.7 207  
+gtdb_PF13685.1 268  
+TIGR00037 106  
+TIGR00064 276  
+TIGR00111 255  
+TIGR00279 132  
+TIGR00291 212  
+TIGR00335 165  
+TIGR00373 113  
+TIGR00405 121  
+TIGR00448 135  
+TIGR00483 383  
+TIGR00491 505  
+TIGR00501 227  
+TIGR00967 352  
+TIGR00982 134  
+TIGR01008 172  
+TIGR01012 176  
+TIGR01020 171  
+TIGR01028 173  
+TIGR01171 196  
+TIGR01425 399  
+TIGR02389 299  
+TIGR02390 728  
+TIGR03626 244  
+TIGR03628 118  
+TIGR03629 126  
+TIGR03670 554  
+TIGR03673 116  
+TIGR03676 335  
+TIGR03680 358  
+TIGR03722 278  
+
+
+
+
+### Concatenate sequences
+
+
+```{bash}
+#6c. concatenate 
+mkdir Alignment/concatenated
+
+/export/lv1/user/spang_team/Scripts/catfasta2phyml/catfasta2phyml.pl -f -c Alignment/BMGE/h0.55/* > Alignment/concatenated/UndinMarkers_BSArcRep_v2.faa
+
+#control that we have the nr of genomes we expect --> 529
+grep -c ">" Alignment/concatenated/UndinMarkers_BSArcRep_v2.faa
+```
+
+
+Alignment/BMGE/h0.55/OG525. = 1-497  
+Alignment/BMGE/h0.55/PF00410.14 = 498-619  
+Alignment/BMGE/h0.55/PF00673 = 620-765  
+Alignment/BMGE/h0.55/TIGR00037 = 766-871  
+Alignment/BMGE/h0.55/TIGR00064 = 872-1147  
+Alignment/BMGE/h0.55/TIGR00111 = 1148-1402  
+Alignment/BMGE/h0.55/TIGR00279 = 1403-1534  
+Alignment/BMGE/h0.55/TIGR00291 = 1535-1746  
+Alignment/BMGE/h0.55/TIGR00335 = 1747-1911  
+Alignment/BMGE/h0.55/TIGR00373 = 1912-2024  
+Alignment/BMGE/h0.55/TIGR00405 = 2025-2145  
+Alignment/BMGE/h0.55/TIGR00448 = 2146-2280  
+Alignment/BMGE/h0.55/TIGR00483 = 2281-2663  
+Alignment/BMGE/h0.55/TIGR00491 = 2664-3168  
+Alignment/BMGE/h0.55/TIGR00501 = 3169-3395  
+Alignment/BMGE/h0.55/TIGR00967 = 3396-3747  
+Alignment/BMGE/h0.55/TIGR00982 = 3748-3881  
+Alignment/BMGE/h0.55/TIGR01008 = 3882-4053  
+Alignment/BMGE/h0.55/TIGR01012 = 4054-4229  
+Alignment/BMGE/h0.55/TIGR01020 = 4230-4400  
+Alignment/BMGE/h0.55/TIGR01028 = 4401-4573  
+Alignment/BMGE/h0.55/TIGR01171 = 4574-4769  
+Alignment/BMGE/h0.55/TIGR01425 = 4770-5168  
+Alignment/BMGE/h0.55/TIGR02389 = 5169-5467  
+Alignment/BMGE/h0.55/TIGR02390 = 5468-6195  
+Alignment/BMGE/h0.55/TIGR03626 = 6196-6439  
+Alignment/BMGE/h0.55/TIGR03628 = 6440-6557  
+Alignment/BMGE/h0.55/TIGR03629 = 6558-6683  
+Alignment/BMGE/h0.55/TIGR03670 = 6684-7237  
+Alignment/BMGE/h0.55/TIGR03673 = 7238-7353  
+Alignment/BMGE/h0.55/TIGR03676 = 7354-7688  
+Alignment/BMGE/h0.55/TIGR03680 = 7689-8046  
+Alignment/BMGE/h0.55/TIGR03722 = 8047-8324  
+Alignment/BMGE/h0.55/gtdb_PF00466.15 = 8325-8557  
+Alignment/BMGE/h0.55/gtdb_PF00687.16 = 8558-8728  
+Alignment/BMGE/h0.55/gtdb_PF00827.12 = 8729-8886  
+Alignment/BMGE/h0.55/gtdb_PF00900.15 = 8887-9073  
+Alignment/BMGE/h0.55/gtdb_PF01000.21 = 9074-9214  
+Alignment/BMGE/h0.55/gtdb_PF01015.13 = 9215-9367  
+Alignment/BMGE/h0.55/gtdb_PF01090.14 = 9368-9487  
+Alignment/BMGE/h0.55/gtdb_PF01157.13 = 9488-9569  
+Alignment/BMGE/h0.55/gtdb_PF01200.13 = 9570-9632  
+Alignment/BMGE/h0.55/gtdb_PF01655.13 = 9633-9713  
+Alignment/BMGE/h0.55/gtdb_PF01798.13 = 9714-9899  
+Alignment/BMGE/h0.55/gtdb_PF07541.7 = 9900-10106  
+Alignment/BMGE/h0.55/gtdb_PF13685.1 = 10107-10374  
+
+
+
+### Check for sequences with lots of gaps and remove (optional)
+
+
+At the moment we just remove sequences with 100% gaps (sanity check to see if the sequence removal is ok). Adjust for your purposes if you want to be more stringent.
+
+```{bash}
+python ~/../spang_team/Scripts/Others/faa_drop.py Alignment/concatenated/UndinMarkers_BSArcRep_v2.faa Alignment/concatenated/UndinMarkers_BSArcRep_v2_no_gappy_seq.faa 1.0 > gap_removal_summary
+
+#how many sequence were removed? --> 0
+wc -l gap_removal_summary 
+```
+
+
+
+### Run iqtree
+
+```{bash}
+#organize files
+mkdir -p Phylogeny/IQtree/v1_lg_c60
+cp Alignment/concatenated/UndinMarkers_BSArcRep_v2_no_gappy_seq.faa Phylogeny/IQtree/v1_lg_c60
+cd Phylogeny/IQtree/v1_lg_c60
+
+#lg C60 on laplace: 131077
+cp ~/../spang_team/Scripts/Bash_scripts/iqtree_concat.sh .
+
+#started on laplace, no87, 21482
+module load iqtree/2.1.2
+iqtree2 -s UndinMarkers_BSArcRep_v2_no_gappy_seq.faa  -m LG+C60+F+R  -T AUTO --threads-max 80 -B 1000 -alrt 1000
+
+#add taxon string
+perl ~/../spang_team/Scripts/Others/Replace_tree_names.pl ../../../FileLists/names_to_replace_BS_ref_10012023 UndinMarkers_BSArcRep_v2_no_gappy_seq.faa.treefile > UndinMarkers_BSArcRep_v2_no_gappy_seq.faa.treefile_renamed
+
+awk -f ~/../spang_team/Scripts/Others/search_replace.awk ../../../FileLists/names_to_replace_BS_ref_10012023 UndinMarkers_BSArcRep_v2_no_gappy_seq.faa.treefile > UndinMarkers_BSArcRep_v2_no_gappy_seq.faa.treefile_renamed
+
+```

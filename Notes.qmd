@@ -1,0 +1,288 @@
+---
+engine: knitr
+execute:
+  eval: false
+format:
+  html:
+    embed-resources: true
+    toc: true
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+---
+
+# Notes
+
+## Getting started 
+
+There are different things we need and the resources I use myself:
+
+- A bash shell (WSL)
+- A text editor (Rstudio)
+- Git (WSL)
+- A github account
+
+The software carpentries has an excellent introduction for setting these things up for different operating systems:
+
+https://carpentries.github.io/workshop-template/#git
+
+
+## Define global settings
+
+- The settings below help the system remember you and link you with your github account.
+- credential.helper store will save your token after you enter it once
+- core.filemode false is useful if you work from both Linux/Mac and windows and ignore line ending changes
+
+```{bash}
+git config --global user.name "John Doe"
+git config --global user.email johndoe@example.com
+
+git config --global credential.helper store
+git config --global core.filemode false
+
+#check current config settings
+git config --list
+```
+
+
+## Tokkens
+
+Whenever you first want to push a local repository to github (we will go through this below), you will be asked for your username and password. The username is the one you use to log into your github account but the password is not. When you are asked for your password, you are supposed to fill in a token. 
+
+To generate a new token go to your github page and click on your user image on the upper right-hand corner and go to settings. From there click Developer settings (last tab on the bottom left) --> Personal access tokens --> Tokens (classic).
+
+Here, click generate new token --> classic --> add a note, such as `terminal access` , set the duration and select scopes. To use a basic scopes, select repo. 
+
+**Copy the key into a secure location**. Once you leave the site, the code will not be shown again.
+
+
+
+## Upload a repo to github
+
+1. Log into github and go to either your private or organizational github
+2. On the top right (for your own github) click the plus sign and "new repo"
+3. Enter Repo name. Ideally, give it the same name as the folder name you want to track. I.e. `ProjectOrga_tutorial`
+4. Click public if you are fine with others seeing your data, click private for work in progress. You can change this afterwards. Public is nice if you want to render htmls as websites, i.e. student tutorials.
+5. Decide what you want to add, in this example, we manually will add a readme and gitignore file
+6. Click create repo
+
+
+There are different ways to link the github repo with your local files, we will follow the steps for the command line.
+
+To do this, open a terminal and `cd` into `ProjectOrga_tutorial`
+
+```{bash}
+#create a new git repository
+git init
+
+#add our pre-existing readme file
+git add README.md
+
+#check what happens 
+git status
+```
+
+We should see now that the README file was added to the stagging phase and that we have several files that are not yet tracked.
+
+To move the readme from the staging to the commited phase we do:
+
+```{bash}
+#commit
+git commit -m "add readme"
+
+#check status
+git status
+```
+
+We should see that the readme is gone from the staging phase. If we refresh the browser, we see that nothing changed and the readme is not there. This is because we are at the moment only tracking changes on our local computer and we still need to add them to github.
+
+You will mainly work on the main branch but **branches** are useful and allow you to develop features, fix bugs, or safely experiment with new ideas in a contained area of your repository.
+
+To do this we first do some cosmetics and rename the working branch from master to main and then link our local and github repo.
+
+**if you follow the code add the correct link in the git remote add command**
+
+```{bash}
+#change the name of our current working branch
+git branch -M main
+
+#check if that worked 
+git status
+
+#link local and github
+git remote add origin https://github.com/ndombrowski/ProjectOrga_tutorial.git
+
+#push to github
+git push -u origin main
+```
+
+git push origin is a git command that pushes a local branch(es) to a remote repository (origin). By setting the -u flag to origin main every 
+next pull will refer to it.
+
+
+If we refresh the browser we should see a rendered version of the readme, while the files in the other directories are not there yet. Our next goal is to upload those. Instead of adding a single file, as we did for the readme, we can add multiple files using wildcards.
+
+```{bash}
+#add all other files in the current directory 
+git add .
+
+#check status
+git status
+```
+
+
+
+## gitignore
+
+We should check every single file in the staging area.
+
+**Carefully check the list since we don't want to push large or unnecessary files**. I.e. we don't want to upload the `.DS_Store` files or any fasta files.
+
+To do this we create a .gitignore file.
+
+```{bash}
+nano .gitignore
+```
+
+Enter the files we don't want to track, one line per category. Use wildcards to grep multiple files:
+
+*.DS_Store
+*fasta
+
+
+We can also make exceptions. I.e. don't track any fasta files with the exceptions of `fancy.fasta`. To do this add another line:
+
+!fancy.fasta
+
+Close nano with Ctrl + X and save.
+
+
+
+## Unstaging
+
+If we check the status with `git status` again. We see the new .gitignore file was added but the .DS_Store files are still stages. To make them disappear we first need to unstage these files first:
+
+```{bash}
+#unstage files
+git restore --staged .
+
+#check if that worked
+git status
+
+#add files again
+git add .
+
+#check if the DS_store file disappeared
+git status
+
+#commit changes
+git commit
+```
+
+Sometimes it is useful to add more than one line of comments with git commit. To do this we ommit the `-m` option we used before and now enter a nano editor. Inside we can be more elaborate in what we enter. I.e. we could write
+
+```
+Added files:
+
+- Workflow to generate phylo
+- Workflow to visualize treefile in R
+```
+
+Close nano and save to push the changes:
+
+```{bash}
+git push
+```
+
+Now, we don't need the extra stuff we used before (origin main), since we set this as default. If we reload the browser we should see all changes.
+
+
+
+
+## Git log
+
+Git log allows us to view all the commits made:
+
+```{bash}
+#view history
+git log
+
+#view history in condensed format
+git log --oneline
+```
+
+
+
+
+## Git diff
+
+Git diff checks the status of the repository.
+
+```{bash}
+git diff
+```
+
+If we run this now, nothing should appear on the screen but let's create a new file.
+
+```{bash}
+#change content of text file
+ll > test.txt
+
+#check diff
+git diff
+```
+
+We now see, that there is one file that we made changes to.
+
+
+
+## Resetting
+
+Let's commit the changes we made to our text file:
+
+```{bash}
+#push changes
+git add .
+git commit -m "edited txt file"
+git push
+
+#view commit history
+git log
+```
+
+We see that each commit has a commit hash (i.e. 16c1466af05b88f6b450152943b7acdf152c601a), a unique identifier for the attached commit.
+
+To undo the most recent commit, we can copy the commit hash and run the command `git revert <commit hash>`. I.e. something like this (**change the hash to whatever you to for the commit for our edited text file)
+
+```{bash}
+#revert last commit
+git revert 16c1466af05b88f6b450152943b7acdf152c601a
+
+#check status
+git status
+```
+
+If you do this you will see what is called a COMMIT_EDITMSG; it holds a commit message of a commit in progress. It includes information about the commit that you’re reverting, including the author, the branch, the file, and the message. The goal for you is to review it and close the commit editor.
+
+Notice: If you refresh the web browser, the local changes didn't make it to github yet. So we need to push them as well. 
+
+```{bash}
+#push changes 
+git push
+
+#view the log
+git log
+
+#check the text file
+head test.txt
+```
+
+Now, if we view the contents of our text file, we can see the output of the ls command is gone and we are back to the old version.
+
+
+
+## Merge conflicts
+
+Merge conflicts mainly happen if several people work on a repository, so we won't go into this during this tutorial but some material can be found here
+
+- [Some general recommendations to avoid such issues](https://dev.to/github/how-to-prevent-merge-conflicts-or-at-least-have-less-of-them-109p).
+- [More practical information about dealing with merge conflicts](https://www.atlassian.com/git/tutorials/using-branches/merge-conflicts)

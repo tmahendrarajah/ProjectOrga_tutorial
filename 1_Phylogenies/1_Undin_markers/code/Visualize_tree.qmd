@@ -1,0 +1,450 @@
+---
+execute:
+  eval: true
+format:
+  html:
+    embed-resources: true
+    df-print: paged
+    toc: true
+code-block-bg: true
+code-block-border-left: "#31BAE9"
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Visualize Elife_RepSet_C60 tree
+
+**Objective**
+
+Notebook used to visualize tree for publication, highlighting the new MAGs (separate colors for archaea versus bacteria).
+
+**For tutorial purposes, this notebook also includes some random bash and python code chunks**
+
+
+## Requirements
+
+**R libs**:
+
+For details, see system info at the bottom of this report.
+
+- knitr (not essential)
+- tidytree
+- ape
+- phytools
+- ggtree
+- ggplot2
+- tidyr
+
+
+## Setup notebook
+
+```{r}
+#| echo: false
+
+library(knitr)
+library(kableExtra)
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(eval=TRUE, cache=FALSE, message=FALSE, warning=FALSE, 
+                      comment = "", results="markup")
+knit_print <- knitr::normal_print
+
+#installing ggtree
+#library(BiocManager)
+#BiocManager::install("ggtree")
+```
+
+
+```{r}
+#| echo: false
+#| eval: false
+
+#create dependencies
+#documentation: https://github.com/rstudio/packrat
+library(packrat)
+
+#view active repos
+options(repos=structure(BiocManager::repositories()))
+getOption("repos")
+
+#create description
+packrat::init()
+```
+
+
+
+```{r}
+#| message: false
+
+library(tidytree)
+library("ggplot2")
+library(ape)
+library("ggtree")
+library(tidyverse)
+library(phangorn)  #for midpoint rooting
+```
+
+```{bash}
+#check the absolute path for our working directory
+pwd
+```
+
+
+
+## Load data
+
+```{r}
+#tree
+tree_original  <-read.tree("../treefiles/Elife_25_BacArcBSRep_v1_no_gappy_seq.faa.treefile_renamed")
+```
+
+
+
+
+## Make a mapping file based on the tip labels
+
+```{r}
+#get the tip labels and print
+labels <- as.data.frame(tree_original$tip.label)
+#write.table(labels, "Figure///tree_labels.txt",  sep = "\t", row.names = F, quote =F)
+
+#relabel column name
+colnames(labels) <- "label"
+
+#control that the count is what we expect
+dim(labels)
+
+#add a column were the rows go from 1 - xx to be able to always restore the tree order
+mapping <- tibble::rownames_to_column(labels, "tree_order")
+
+#create a new column, with NIOZ MAGs highlighted
+mapping$category <- ifelse(grepl("NIOZ",mapping$label),'BS_MAG','Ref')
+
+#split the label string to get the different tax levels
+mapping <- separate(data = mapping, col = label, into = c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species", "accession"), sep = "\\-", remove = FALSE)
+
+#make a second category were we distinguish between arc and bac
+mapping$category_2 <- ifelse((mapping$category == "BS_MAG" & mapping$Domain == "Archaea"  ),'BS_Arc',
+                      ifelse((mapping$category == "BS_MAG" & mapping$Domain == "Bacteria"  ), "BS_Bac",
+                      ifelse((mapping$category == "Ref" & mapping$Domain == "d__Archaea"  ), "Ref_Arc",
+                      ifelse((mapping$category == "Ref" & mapping$Domain == "d__Bacteria"  ), "Ref_Bac",
+                             'Ref'))))
+
+#print final mapping file and control dimensions
+head(mapping)
+dim(mapping)
+```
+
+
+## Cluster data and add info to tree
+
+We define clusters based on how we want to color taxa in the tree. I.e. we want to give new MAGs from the archaea and bacteria different colors than for the reference genomes.
+
+**Warning**
+
+Carefully inspect if all sub-lists are populated and later check of the coloring of the branches is what you expect.
+
+```{r}
+#define clusters
+my_list <- list(BS_Arc=subset(mapping, category_2 == "BS_Arc")$label,
+            BS_Bac=subset(mapping, category_2 == "BS_Bac")$label ,
+            Ref_Arc=subset(mapping, category_2 == "Ref_Arc")$label ,
+            Ref_Bac=subset(mapping, category_2 == "Ref_Bac")$label 
+            )
+
+str(my_list)
+
+#add clusters to our raw tree
+tree_original_grouped <- groupOTU(tree_original, my_list, overlap='abandon', connect = FALSE)
+```
+
+
+
+
+## Pre-view tree to get the node lables
+
+Notice: Disable scale_color_manual if you have more than 3 levels or manually change
+
+```{r}
+#| eval: false
+
+# 0 --> darkgrey
+# BS_Arc --> #a557b3 (darkpurple)
+# BS_Bac  --> #004c6d (darkblue)
+# Ref_Arc --> #ffa7ff (lightpurple)
+# Ref_Bac --> #00a1c1 (lightblue)
+
+tree_1 <-
+ggtree(tree_original_grouped, layout="roundrect", size = 0.1, aes(color = group)) +
+  geom_treescale() +
+  scale_color_manual(values=c("darkgrey", "#a557b3", "#004c6d", "darkgrey","darkgrey" )) +
+  geom_tiplab(size = 1, color = "black") +
+  geom_text2(aes(x=branch, label=node), size = 1, vjust=0)
+
+
+pdf("../figures//tree_long_nodes.pdf", width=30, height=150)
+tree_1
+dev.off()
+```
+
+
+
+## Pre-view tree to get the bootstraps labels
+
+
+```{r}
+#| eval: false
+
+tree_1 <-
+ggtree(tree_original_grouped, layout="roundrect", size = 0.1, aes(color = group)) +
+  geom_treescale() +
+  scale_color_manual(values=c("darkgrey", "#a557b3", "#004c6d", "darkgrey","darkgrey" )) +
+  geom_tiplab(size = 0.8, color = "black") +
+  geom_text2(aes(subset = !isTip, label=label), size = 0.6, vjust=0, hjust = 1)
+
+pdf("../figures/tree_long_BS.pdf", width=30, height=150)
+tree_1
+dev.off()
+```
+
+After visual inspection:
+
+- If we want to root with DPANN that is node --> 684
+- If we want to root between arc and bac, that is node --> 2104
+
+
+
+## Clean tree 
+
+### Root tree and add metadata
+
+```{r}
+#root (use ape to root with DPANN, use phangorn for midpoint rooting)
+#tree_DPANN_root <- ape::root(tree_ape, node = 684, edgelabel = TRUE)
+tree_midpoint<- phangorn::midpoint(tree_original, node.labels = "support")
+
+#add mapping data
+tree_mapped <- tidytree::full_join(tree_midpoint, mapping, by='label')
+
+#control structure in tree file
+str(tree_mapped)
+
+#define groups for mapped tree
+tree_mapped_grouped <- groupOTU(tree_mapped, my_list, overlap='abandon', connect = FALSE)
+```
+
+
+
+### Deal with double boostrap
+
+
+```{r}
+#convert our tree into a data table
+q <- ggtree(tree_mapped_grouped)
+d <- q$data
+
+#view structure
+head(as.data.frame(d))
+
+#remove irrelevant tip data
+#d <- d[!d$isTip,]
+head(as.data.frame(d))
+
+#split the two bs
+d_cleaned <- separate(data = d, col = label, into = c("alrt", "bb"), sep = "/", remove = F)
+
+#clean labels and make numeric
+d_cleaned$bb <- as.numeric(d_cleaned$bb)
+d_cleaned$alrt <- as.numeric(d_cleaned$alrt)
+
+#set cutoffs to use for alrt
+d_cleaned$alrt_cats <- d_cleaned$alrt
+d_cleaned$alrt_cats <- ifelse(d_cleaned$alrt_cats == 100, 100,
+                        ifelse(d_cleaned$alrt_cats >= 90, 90,
+                        ifelse(d_cleaned$alrt_cats >=80, 80
+                              , 0)))
+
+#convert to char
+d_cleaned$alrt_cats <- as.character(d_cleaned$alrt_cats)
+
+#control
+head(as.data.frame(d_cleaned))
+```
+
+
+
+
+## Plot tree
+
+### Long and rooted, show bootstrap support
+
+```{r}
+#| eval: false
+
+tree_1 <-
+ggtree(tree_mapped_grouped, layout="roundrect", size = 0.001, aes(color = group)) +
+  geom_treescale() +
+  scale_color_manual("" , values=c("darkgrey", "#a557b3", "#004c6d", "darkgrey","darkgrey" ), 
+                     label = c("basal branch", "archaeal BS MAG", "bacterial BS MAG", "archaeal reference genome", "bacterial reference genome")) +
+  geom_tiplab(size = 0.8, aes(color = group)) +
+  geom_text2(aes(subset = !isTip, label=label), size = 0.4, vjust=0, hjust = 1) +
+  theme(legend.position="top") +
+  xlim(NA, 15) +
+  theme(plot.margin = unit(c(14,8,14,8), "mm"))
+
+pdf("../figures/tree_long_midpoint_BS_r202.pdf", width=15, height=100)
+tree_1
+dev.off()
+```
+
+
+
+### Long and rooted, showing node label
+
+```{r}
+#| eval: false
+
+tree_2 <-
+ggtree(tree_mapped_grouped, layout="roundrect", size = 0.05, aes(color = group)) +
+  geom_treescale() +
+  scale_color_manual(values=c("darkgrey", "#a557b3", "#004c6d", "darkgrey","darkgrey" )) +
+  geom_tiplab(size = 1, color = "black") +
+  geom_text2(aes(x=branch, label=node), size = 1.5, vjust=0) +
+  coord_cartesian(clip = 'off')
+
+#tree_long
+
+pdf("../figures/tree_long_rooted_Node.pdf", width=20, height=80)
+tree_2
+dev.off()
+```
+
+
+### Circular and color the mags of interest circle BS
+
+
+```{r}
+#| fig-height: 14
+#| fig-width: 14
+#| label: fig-line-plot
+#| fig-cap: "Species tree using the Elife marker and run using the C60 model"
+
+#plot
+tree_test <-
+ggtree(tree_mapped_grouped, size = 0.3, layout='circular', aes(color=group)) +   #, branch.length='none'
+  xlim(-2, NA) +
+  geom_treescale(x= -2, y= 0, linesize = 1) +
+  scale_color_manual(values=c("darkgrey", "#a557b3", "#0E86D4", "grey","grey"),
+                    label = c("basal branch", "archaeal BS MAG", "bacterial BS MAG", "archaeal reference genome", "bacterial reference genome")) +
+  guides(color=guide_legend("")) +
+  
+  #label lineages of interest, gives a warning, can be ignored
+  geom_cladelabel(node=3010, label="Omnitrophica", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2901, label="Verrucomicrobia", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2938, label="Planctomycetes", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2709, label="FBC", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2280, label="Proteobacteria", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2484, label="Deltaproteobacteria", angle=0, fontsize=2, offset=-0.5, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2647, label="Aminicenantes", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=3120, label="Poribacteria", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2855, label="Cloacimonadota", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=3769, label="Cyanobacteria", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=3218, label="Actinobacteria", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=3404, label="CPR", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=3296, label="Chloroflexi", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=3157, label="Caldatribacteriota", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=3825, label="DPANN", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2106, label="Euryarchaeota", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  geom_cladelabel(node=2103, label="TACK+A", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  #geom_cladelabel(node=4082, label="Asgard", angle=0, fontsize=4, offset=0, offset.text = 0.5, align = T, barsize = 1) +
+  
+  #add in dots for BS supports
+  geom_nodepoint(data = d_cleaned,aes(fill = cut(as.numeric(alrt),c(0,90,99.9,100)), x =  branch),shape = 21, size = 0.5 , colour = "transparent") +
+  scale_fill_manual(values = c("black","darkgrey", "transparent"),  name = "Bootstrap inferred with SH-aLRT test", breaks = c("(99.9,100]", "(90,99.9]", "(0,90]" ), labels = expression("99.9 - 100", "90 - 99.9", "< 90" ) ) 
+
+#print
+#pdf("../figures//circular_tree_grouped_2.pdf", width=20, height=20)
+tree_test
+#dev.off()
+```
+
+The treescale position in rectangular is:  x co-ordinate is relative to the root in branchlength, and y co-ord is relative to the number of sequences
+
+
+Additional options with:
+
+- Color label and bar -->  color = "#EC762F"
+
+
+
+
+
+### Circular and color the mags of interest written BS (control)
+
+
+```{r}
+#| eval: false
+
+#set cutoff for bs
+d_cutoff <- d_cleaned[d_cleaned$alrt > 90,]
+
+#plot
+tree_test <-
+ggtree(tree_mapped_grouped, layout='circular', aes(color=group)) +   #, branch.length='none'
+  xlim(-2, NA) +
+  geom_treescale(x= -2, y= 0, linesize = 1) +
+  scale_color_manual(values=c("darkgrey", "#a557b3", "#004c6d", "grey","grey" )) +
+  guides(color=guide_legend("")) +
+  geom_tiplab(size = 0.2, color = "lightgrey") +
+  geom_text(data=d_cleaned, aes(label=alrt), size = 0.5, color = "black") 
+  #scale_size_manual(values=c(0,2,4,6))
+  #scale_size_continuous(range = c(0, 1)) # scales point sizes
+  #geom_text2(aes(subset = !isTip, label=label), size = 0.8)
+  #geom_tippoint(aes(colour=color), size = 0.1)
+  #geom_text(aes(label=node))
+
+pdf("../figures/circular_tree2_written_bs.pdf", width=15, height=15)
+tree_test
+dev.off()
+```
+
+
+
+## Random py example code
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+
+fig = plt.figure()
+x = np.arange(10)
+y = 2.5 * np.sin(x / 20 * np.pi)
+yerr = np.linspace(0.05, 0.2, 10)
+
+plt.errorbar(x, y + 3, yerr=yerr, label='both limits (default)')
+plt.errorbar(x, y + 2, yerr=yerr, uplims=True, label='uplims=True')
+plt.errorbar(x, y + 1, yerr=yerr, uplims=True, lolims=True,
+             label='uplims=True, lolims=True')
+
+upperlimits = [True, False] * 5
+lowerlimits = [False, True] * 5
+plt.errorbar(x, y, yerr=yerr, uplims=upperlimits, lolims=lowerlimits,
+             label='subsets of uplims and lolims')
+
+plt.legend(loc='lower right')
+plt.show(fig)
+```
+
+
+
+
+## Print session info
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
